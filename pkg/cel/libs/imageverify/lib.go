@@ -9,7 +9,7 @@ import (
 	"github.com/kyverno/sdk/extensions/imagedataloader"
 	"k8s.io/apimachinery/pkg/util/version"
 	apiservercel "k8s.io/apiserver/pkg/cel"
-	k8scorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	corev1listers "k8s.io/client-go/listers/core/v1"
 )
 
 const libraryName = "kyverno.imageverify"
@@ -19,14 +19,14 @@ type lib struct {
 	version *version.Version
 	imgCtx  imagedataloader.ImageContext
 	ivpol   policiesv1beta1.ImageValidatingPolicyLike
-	lister  k8scorev1.SecretInterface
+	lister  corev1listers.SecretLister
 }
 
 func Latest() *version.Version {
 	return versions.KyvernoLatest
 }
 
-func Lib(v *version.Version, imgCtx imagedataloader.ImageContext, ivpol policiesv1beta1.ImageValidatingPolicyLike, lister k8scorev1.SecretInterface) cel.EnvOption {
+func Lib(v *version.Version, imgCtx imagedataloader.ImageContext, ivpol policiesv1beta1.ImageValidatingPolicyLike, lister corev1listers.SecretLister) cel.EnvOption {
 	// create the cel lib env option
 	return cel.Lib(&lib{
 		version: v,

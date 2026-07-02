@@ -8,16 +8,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 	policiesv1beta1 "github.com/kyverno/api/api/policies.kyverno.io/v1beta1"
 	"github.com/kyverno/kyverno/api/kyverno"
 	"github.com/kyverno/kyverno/pkg/admissionpolicy"
 	"github.com/kyverno/kyverno/pkg/cel/engine"
 	"github.com/kyverno/kyverno/pkg/cel/libs"
 	"github.com/kyverno/kyverno/pkg/cel/matching"
+	"github.com/kyverno/kyverno/pkg/config"
 	engineapi "github.com/kyverno/kyverno/pkg/engine/api"
 	eval "github.com/kyverno/kyverno/pkg/image/verification/evaluator"
 	admissionutils "github.com/kyverno/kyverno/pkg/utils/admission"
 	"github.com/kyverno/sdk/extensions/imagedataloader"
+	"github.com/kyverno/sdk/extensions/regcreds"
 	"golang.org/x/exp/maps"
 	"gomodules.xyz/jsonpatch/v2"
 	admissionv1 "k8s.io/api/admission/v1"
@@ -26,7 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apiserver/pkg/admission"
-	k8scorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	corev1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 )
 
@@ -44,26 +48,23 @@ type Engine interface {
 type NamespaceResolver = engine.NamespaceResolver
 
 type engineImpl struct {
-	provider     Provider
-	nsResolver   NamespaceResolver
-	matcher      matching.Matcher
-	lister       k8scorev1.SecretInterface
-	registryOpts []imagedataloader.Option
+	provider   Provider
+	nsResolver NamespaceResolver
+	matcher    matching.Matcher
+	lister     corev1listers.SecretLister
 }
 
 func NewEngine(
 	provider Provider,
 	nsResolver NamespaceResolver,
 	matcher matching.Matcher,
-	lister k8scorev1.SecretInterface,
-	registryOpts []imagedataloader.Option,
+	lister corev1listers.SecretLister,
 ) Engine {
 	return &engineImpl{
-		provider:     provider,
-		nsResolver:   nsResolver,
-		matcher:      matcher,
-		lister:       lister,
-		registryOpts: registryOpts,
+		provider:   provider,
+		nsResolver: nsResolver,
+		matcher:    matcher,
+		lister:     lister,
 	}
 }
 
@@ -129,7 +130,6 @@ func (e *engineImpl) HandleValidating(ctx context.Context, request EngineRequest
 
 func (e *engineImpl) HandleMutating(ctx context.Context, request EngineRequest, predicate Predicate) (eval.ImageVerifyEngineResponse, []jsonpatch.JsonPatchOperation, error) {
 	var response eval.ImageVerifyEngineResponse
-	// fetch compiled policies
 	policies, err := e.provider.Fetch(ctx)
 	if err != nil {
 		return response, nil, err
@@ -237,7 +237,18 @@ func (e *engineImpl) handleMutation(
 			}
 		}
 	}
-	ictx, err := imagedataloader.NewImageContext(e.lister, e.registryOpts...)
+
+	allNameOpts := []name.Option{}
+	allAuthOpts := []remote.Option{}
+	for _, p := range filteredPolicies {
+		if p.Policy.GetSpec().Credentials != nil {
+			authOpts, nameOpts := regcreds.RemoteOptsFromIvpolCredentials(e.lister, *p.Policy.GetSpec().Credentials, config.KyvernoNamespace())
+			allAuthOpts = append(allAuthOpts, authOpts...)
+			allNameOpts = append(allNameOpts, nameOpts...)
+		}
+	}
+
+	ictx, err := imagedataloader.NewImageContext(e.lister, allAuthOpts, allNameOpts)
 	if err != nil {
 		return nil, nil, err
 	}

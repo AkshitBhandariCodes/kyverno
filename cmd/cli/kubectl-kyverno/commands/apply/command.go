@@ -15,6 +15,8 @@ import (
 	"github.com/go-git/go-billy/v5/memfs"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
+	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 	policiesv1beta1 "github.com/kyverno/api/api/policies.kyverno.io/v1beta1"
 	authzhttp "github.com/kyverno/kyverno-authz/pkg/cel/libs/authz/http"
 	"github.com/kyverno/kyverno-json/pkg/payload"
@@ -53,7 +55,7 @@ import (
 	matchutils "github.com/kyverno/kyverno/pkg/utils/match"
 	utils "github.com/kyverno/kyverno/pkg/utils/restmapper"
 	policyvalidation "github.com/kyverno/kyverno/pkg/validation/policy"
-	"github.com/kyverno/sdk/extensions/imagedataloader"
+	"github.com/kyverno/sdk/extensions/regcreds"
 	"github.com/spf13/cobra"
 	admissionv1 "k8s.io/api/admission/v1"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
@@ -65,8 +67,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
-	k8scorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	corev1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/metadata"
 )
 
@@ -663,16 +666,26 @@ func (c *ApplyCommandConfig) applyImageValidatingPolicies(
 	if err != nil {
 		return nil, err
 	}
-	var lister k8scorev1.SecretInterface
+
+	var lister corev1listers.SecretLister
 	if dclient != nil {
-		lister = dclient.GetKubeClient().CoreV1().Secrets("")
+		kubeClient := dclient.GetKubeClient()
+		informerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+
+		stopCh := make(chan struct{})
+		// This informer will automatically die at the end of this function and thats ok,
+		// we don't care about it past applying image validating policies anyways
+		defer close(stopCh)
+		informerFactory.Start(stopCh)
+		informerFactory.WaitForCacheSync(stopCh)
+
+		lister = informerFactory.Core().V1().Secrets().Lister()
 	}
 	engine := ivpolengine.NewEngine(
 		provider,
 		namespaceProvider,
 		matching.NewMatcher(),
 		lister,
-		[]imagedataloader.Option{imagedataloader.WithLocalCredentials(c.RegistryAccess)},
 	)
 
 	restMapper, err := utils.GetRESTMapper(dclient)
@@ -737,13 +750,27 @@ func (c *ApplyCommandConfig) applyImageValidatingPolicies(
 
 	ivpols := make([]*eval.CompiledImageValidatingPolicy, 0)
 	pMap := make(map[string]policiesv1beta1.ImageValidatingPolicyLike)
+
+	allRemoteOpts := []remote.Option{}
+	allNameOpts := []name.Option{}
+
 	for i := range ivps {
 		p := ivps[i]
 		pMap[p.GetName()] = p
 		ivpols = append(ivpols, &eval.CompiledImageValidatingPolicy{Policy: p})
+
+		creds := p.GetSpec().Credentials
+		// TODO: we shouldn't really be grouping authentication parameters from all policies
+		// into a single array like this. But its fine to keep it until the image context type
+		// is completely dropped
+		if creds != nil {
+			authOpts, nameOpts := regcreds.RemoteOptsFromIvpolCredentials(lister, *creds, config.KyvernoNamespace())
+			allRemoteOpts = append(allRemoteOpts, authOpts...)
+			allNameOpts = append(allNameOpts, nameOpts...)
+		}
 	}
 	for _, json := range jsonPayloads {
-		result, err := eval.Evaluate(context.TODO(), ivpols, json.Object, nil, nil, nil)
+		result, err := eval.Evaluate(context.TODO(), ivpols, json.Object, nil, nil, lister, allRemoteOpts, allNameOpts)
 		if err != nil {
 			if c.ContinueOnFail {
 				fmt.Printf("failed to apply image validating policies on JSON payload: %v\n", err)
