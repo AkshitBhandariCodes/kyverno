@@ -41,7 +41,7 @@ func NewContextProvider(dclient dclient.Interface, restMapper meta.RESTMapper, f
 			lister,
 			gctxstore.New(),
 			restMapper,
-			registryAccess,
+			true,
 		)
 	}
 
